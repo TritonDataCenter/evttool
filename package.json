@@ -1,0 +1,18 @@
+{
+    "name": "evttool",
+    "description": "evttool",
+    "version": "0.0.1",
+    "author": "Joyent (joyent.com)",
+    "private": true,
+    "dependencies": {
+        "dashdash": "1.9.0",
+        "sprintf-js": "1.0.2",
+        "tabula": "1.4.2"
+    },
+    "devDependencies": {
+    },
+    "engines": {
+        "node": ">=0.10"
+    },
+    "license": "MPL-2.0"
+}
