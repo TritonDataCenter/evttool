@@ -35,13 +35,16 @@ var dashdash = require('dashdash');
 var path = require('path');
 
 // GLOBALS
+var insaneReqs = {};
 var ignoredIds = {};
+var lateReqs = {};
 var stylize = stylizeWithColor;
 var openEvents = {};
 var options;
 var cmdline_opts;
 var parser;
 var requestEvents = {};
+var warnings = [];
 
 // define the options
 options = [
@@ -306,6 +309,7 @@ function evtSig(evt) {
 
 function reportProcessRequest(req_id, events, data) {
     var datapoints;
+    var expected_finish;
     var first;
     var sorted;
 
@@ -328,9 +332,23 @@ function reportProcessRequest(req_id, events, data) {
         return;
     }
 
+    expected_finish = first.start + first.elapsed;
+
     // Eg. docker.containercreate
     if (!data.hasOwnProperty(first.id)) {
-        data[first.id] = { events: {} };
+        data[first.id] = {
+            count: 0,
+            events: {},
+            max: 0,
+            min: 0
+        };
+    }
+    data[first.id].count++;
+    if (data[first.id].min === 0 || first.elapsed < data[first.id].min) {
+        data[first.id].min = first.elapsed;
+    }
+    if (data[first.id].max === 0 || first.elapsed > data[first.id].max) {
+        data[first.id].max = first.elapsed;
     }
 
     // Sum the datapoints for this record
@@ -339,10 +357,26 @@ function reportProcessRequest(req_id, events, data) {
         if (!datapoints[evt.id]) {
             datapoints[evt.id] = {};
         }
-        // datapoints[evt.id].count = (!datapoints[evt.id].count
-        //    ? 1 : (datapoints[evt.id].count + 1));
+        datapoints[evt.id].count = (!datapoints[evt.id].count
+            ? 1 : (datapoints[evt.id].count + 1));
         datapoints[evt.id].total = (!datapoints[evt.id].total
             ? evt.elapsed : (datapoints[evt.id].total + evt.elapsed));
+
+        // Any req_id with more than 100 runs of the same task seems like a
+        // problem
+        if (datapoints[evt.id].count > 100) {
+            if (!insaneReqs.hasOwnProperty(req_id)) {
+                insaneReqs[req_id] = {};
+            }
+            insaneReqs[req_id][evt.id] = datapoints[evt.id].count;
+        }
+        if (evt.start > expected_finish) {
+            if (!lateReqs.hasOwnProperty(req_id)) {
+                lateReqs[req_id] = {};
+            }
+            lateReqs[req_id][evt.id] =
+                (!lateReqs[req_id][evt.id] ? 1 : lateReqs[req_id][evt.id] + 1);
+        }
     });
 
     // Any datapoints we want to merge into data, do so now
@@ -350,22 +384,141 @@ function reportProcessRequest(req_id, events, data) {
         if (!data[first.id].events.hasOwnProperty(k)) {
             data[first.id].events[k] = {
                 // counts: [],
+                max: 0,
+                min: 0,
+                sum: 0,
                 values: []
             };
         }
         // data[first.id].events[k].counts.push(datapoints[k].count);
         data[first.id].events[k].values.push(datapoints[k].total);
+        data[first.id].events[k].sum += datapoints[k].total;
+        if (data[first.id].events[k].max === 0
+            || datapoints[k].total > data[first.id].events[k].max) {
+
+            data[first.id].events[k].max = datapoints[k].total;
+        }
+        if (data[first.id].events[k].min === 0
+            || datapoints[k].total < data[first.id].events[k].min) {
+
+            data[first.id].events[k].min = datapoints[k].total;
+        }
     });
 }
 
+function filler(character, count) {
+    var i;
+    var retstr = '';
+
+    for (i = 0; i < count; i++) {
+        retstr += character;
+    }
+
+    return (retstr);
+}
+
+function powerOfTwoBuckets(data) {
+    var buckets = {max_count: 0};
+    var max;
+    var min;
+
+    data.forEach(function (d) {
+        var bucket = 0;
+        var bucket_value;
+
+        while (d >= Math.pow(2, bucket)) {
+            bucket++;
+        }
+        bucket_value = Math.pow(2, bucket);
+
+        if (min === undefined || bucket_value < min) {
+            min = bucket_value;
+        }
+        if (max === undefined || bucket_value > max) {
+            max = bucket_value;
+        }
+
+        if (!buckets[bucket_value]) {
+            buckets[bucket_value] = 0;
+        }
+        buckets[bucket_value]++;
+        if (buckets[bucket_value] > buckets.max_count) {
+            buckets.max_count = buckets[bucket_value];
+        }
+    });
+
+    for (var i = (min / 2); i <= (max * 2); i = i * 2) {
+        if (i > 0) {
+            if (!buckets.hasOwnProperty(i)) {
+                buckets[i] = 0;
+            }
+        }
+    }
+
+    return (buckets);
+}
+
 function outputReport() {
+    var count = 0;
     var data = {};
 
+    // Add data from all requests to "data"
     Object.keys(requestEvents).forEach(function _requestEvent(k) {
         reportProcessRequest(k, requestEvents[k], data);
     });
 
-    console.log(JSON.stringify(data, null, 2));
+    Object.keys(data).forEach(function (id) {
+        if (count > 0) {
+            console.log('');
+        }
+        count++;
+        console.log(id + ' (count: ' + data[id].count + ', min: ' + data[id].min
+            + ', max: ' + data[id].max + ')\n  \\');
+        Object.keys(data[id].events).sort(function (a, b) {
+            return (data[id].events[b].max - data[id].events[a].max);
+        }).forEach(function (_event) {
+            var evt = data[id].events[_event];
+            var median_idx = Math.floor((evt.values.length + 1) / 2);
+
+            if (cmdline_opts.time && evt.max < cmdline_opts.time) {
+                // the slowest one here was too fast for us to care about, skip.
+                return;
+            }
+
+            evt.mean = Math.floor((evt.sum / evt.values.length) * 100) / 100;
+            evt.median = evt.values.sort()[median_idx];
+            evt.buckets = powerOfTwoBuckets(evt.values);
+
+            console.log('   ' + _event
+                + ' (min: ' + evt.min
+                + ', max: ' + evt.max
+                + ', mean: ' + evt.mean
+                + ', median: ' + evt.median + ')');
+            console.log('      value  ----------------------- '
+                + 'Distribution ----------------------- count');
+            Object.keys(evt.buckets).sort(function (a, b) {
+                if (a === 'max_count') {
+                    a = 0;
+                }
+                if (b === 'max_count') {
+                    b = 0;
+                }
+                return (Number(a) - Number(b));
+            }).forEach(function (b) {
+                var hist;
+
+                if (b === 'max_count') {
+                    return;
+                }
+
+                hist = filler('#',
+                    Math.round(60 * evt.buckets[b] / evt.values.length));
+
+                console.log(filler(' ', 11 - b.toString().length) + b + '| '
+                    + hist + filler(' ', 61 - hist.length) + evt.buckets[b]);
+            });
+        });
+    });
 }
 
 function handleBegin(evt) {
@@ -442,6 +595,9 @@ function handleEnd(evt) {
 }
 
 function handleEvent(evt) {
+    if (!evt) {
+        return;
+    }
     switch (evt.phase) {
         case 'end':
             handleEnd(evt);
@@ -499,8 +655,16 @@ function main() {
         if (cmdline_opts.report) {
             outputReport();
         }
+        if (Object.keys(insaneReqs).length > 0) {
+            console.log('\n=== Insane Requests ===');
+            console.log(JSON.stringify(insaneReqs, null, 2));
+        }
+        if (Object.keys(lateReqs).length > 0) {
+            console.log('\n=== Late Requests ===');
+            console.log(JSON.stringify(lateReqs, null, 2));
+        }
         if (cmdline_opts.debug) {
-            console.error('=== Ignored Events ===');
+            console.error('\n=== Ignored Events ===');
             console.error(JSON.stringify(ignoredIds, null, 2));
         }
     });
