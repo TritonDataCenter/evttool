@@ -173,6 +173,12 @@ function objToEvent(obj)
     }
     evt.id = id;
 
+    // req_time can be used to differentiate requests that would otherwise be
+    // identical, we hide it from output/aggregations but include in the id.
+    if (obj.evt.req_time) {
+        evt.id = evt.id + '.' + obj.evt.req_time;
+    }
+
     // Remove some fields we don't care about for now
     delete evt.className;
     delete evt.label;
@@ -269,9 +275,14 @@ function shortTime(time) {
     return (new Date(time).toISOString().split(/[TZ]/)[1]);
 }
 
+function trimIdTime(id) {
+    // imgapi.getimage.1429078896344 -> imgapi.getimage
+    return (id.replace(/\.[0-9]{13}$/, ''));
+}
+
 function shortFmt(evt, opts) {
     var action_prefix = (opts ? opts.prefix : null);
-    var evt_id = evt.id;
+    var evt_id = trimIdTime(evt.id);
     var hostname = evt.hostname;
     var req_id = evt.req_id;
     var time = shortTime(evt.time);
@@ -311,6 +322,7 @@ function reportProcessRequest(req_id, events, data) {
     var datapoints;
     var expected_finish;
     var first;
+    var first_id;
     var sorted;
 
     sorted = events.sort(function _eventSorter(a, b) {
@@ -318,6 +330,7 @@ function reportProcessRequest(req_id, events, data) {
     });
 
     first = sorted[0];
+    first_id = trimIdTime(first.id);
 
     // XXX this assumes a synchronous request at the top level and all other
     // bits for the req_id happen in between.
@@ -327,62 +340,64 @@ function reportProcessRequest(req_id, events, data) {
         return;
     }
 
-    if (cmdline_opts.events && !first.id.match(cmdline_opts.events)) {
-        // console.log('SKIPPING: ' + first.id + ' due to --events');
+    if (cmdline_opts.events && !first_id.match(cmdline_opts.events)) {
+        // console.log('SKIPPING: ' + first_id + ' due to --events');
         return;
     }
 
     expected_finish = first.start + first.elapsed;
 
     // Eg. docker.containercreate
-    if (!data.hasOwnProperty(first.id)) {
-        data[first.id] = {
+    if (!data.hasOwnProperty(first_id)) {
+        data[first_id] = {
             count: 0,
             events: {},
             max: 0,
             min: 0
         };
     }
-    data[first.id].count++;
-    if (data[first.id].min === 0 || first.elapsed < data[first.id].min) {
-        data[first.id].min = first.elapsed;
+    data[first_id].count++;
+    if (data[first_id].min === 0 || first.elapsed < data[first_id].min) {
+        data[first_id].min = first.elapsed;
     }
-    if (data[first.id].max === 0 || first.elapsed > data[first.id].max) {
-        data[first.id].max = first.elapsed;
+    if (data[first_id].max === 0 || first.elapsed > data[first_id].max) {
+        data[first_id].max = first.elapsed;
     }
 
     // Sum the datapoints for this record
     datapoints = {};
     sorted.forEach(function _recordOne(evt) {
-        if (!datapoints[evt.id]) {
-            datapoints[evt.id] = {};
+        var id = trimIdTime(evt.id);
+
+        if (!datapoints[id]) {
+            datapoints[id] = {};
         }
-        datapoints[evt.id].count = (!datapoints[evt.id].count
-            ? 1 : (datapoints[evt.id].count + 1));
-        datapoints[evt.id].total = (!datapoints[evt.id].total
-            ? evt.elapsed : (datapoints[evt.id].total + evt.elapsed));
+        datapoints[id].count = (!datapoints[id].count
+            ? 1 : (datapoints[id].count + 1));
+        datapoints[id].total = (!datapoints[id].total
+            ? evt.elapsed : (datapoints[id].total + evt.elapsed));
 
         // Any req_id with more than 100 runs of the same task seems like a
         // problem
-        if (datapoints[evt.id].count > 100) {
+        if (datapoints[id].count > 100) {
             if (!insaneReqs.hasOwnProperty(req_id)) {
                 insaneReqs[req_id] = {};
             }
-            insaneReqs[req_id][evt.id] = datapoints[evt.id].count;
+            insaneReqs[req_id][id] = datapoints[id].count;
         }
         if (evt.start > expected_finish) {
             if (!lateReqs.hasOwnProperty(req_id)) {
                 lateReqs[req_id] = {};
             }
-            lateReqs[req_id][evt.id] =
-                (!lateReqs[req_id][evt.id] ? 1 : lateReqs[req_id][evt.id] + 1);
+            lateReqs[req_id][id] =
+                (!lateReqs[req_id][id] ? 1 : lateReqs[req_id][id] + 1);
         }
     });
 
     // Any datapoints we want to merge into data, do so now
     Object.keys(datapoints).forEach(function (k) {
-        if (!data[first.id].events.hasOwnProperty(k)) {
-            data[first.id].events[k] = {
+        if (!data[first_id].events.hasOwnProperty(k)) {
+            data[first_id].events[k] = {
                 // counts: [],
                 max: 0,
                 min: 0,
@@ -390,18 +405,18 @@ function reportProcessRequest(req_id, events, data) {
                 values: []
             };
         }
-        // data[first.id].events[k].counts.push(datapoints[k].count);
-        data[first.id].events[k].values.push(datapoints[k].total);
-        data[first.id].events[k].sum += datapoints[k].total;
-        if (data[first.id].events[k].max === 0
-            || datapoints[k].total > data[first.id].events[k].max) {
+        // data[first_id].events[k].counts.push(datapoints[k].count);
+        data[first_id].events[k].values.push(datapoints[k].total);
+        data[first_id].events[k].sum += datapoints[k].total;
+        if (data[first_id].events[k].max === 0
+            || datapoints[k].total > data[first_id].events[k].max) {
 
-            data[first.id].events[k].max = datapoints[k].total;
+            data[first_id].events[k].max = datapoints[k].total;
         }
-        if (data[first.id].events[k].min === 0
-            || datapoints[k].total < data[first.id].events[k].min) {
+        if (data[first_id].events[k].min === 0
+            || datapoints[k].total < data[first_id].events[k].min) {
 
-            data[first.id].events[k].min = datapoints[k].total;
+            data[first_id].events[k].min = datapoints[k].total;
         }
     });
 }
@@ -571,7 +586,7 @@ function handleEnd(evt) {
     requestEvents[evt.req_id].push({
         elapsed: evt.elapsed,
         hostname: evt.hostname,
-        id: evt.id,
+        id: trimIdTime(evt.id),
         start: start
     });
 
@@ -663,7 +678,7 @@ function main() {
             console.log('\n=== Late Requests ===');
             console.log(JSON.stringify(lateReqs, null, 2));
         }
-        if (cmdline_opts.debug) {
+        if (cmdline_opts.debug && Object.keys(ignoredIds).length > 0) {
             console.error('\n=== Ignored Events ===');
             console.error(JSON.stringify(ignoredIds, null, 2));
         }
