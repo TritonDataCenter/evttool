@@ -173,10 +173,13 @@ function objToEvent(obj)
     }
     evt.id = id;
 
-    // req_time can be used to differentiate requests that would otherwise be
-    // identical, we hide it from output/aggregations but include in the id.
+    // req_time/req_seq can be used to differentiate requests that would
+    // otherwise be identical, we hide it from output/aggregations but include
+    // in the id.
     if (obj.evt.req_time) {
         evt.id = evt.id + '.' + obj.evt.req_time;
+    } else if (obj.evt.req_seq) {
+        evt.id = evt.id + '.' + obj.evt.req_seq;
     }
 
     // Remove some fields we don't care about for now
@@ -275,14 +278,14 @@ function shortTime(time) {
     return (new Date(time).toISOString().split(/[TZ]/)[1]);
 }
 
-function trimIdTime(id) {
+function trimIdSeq(id) {
     // imgapi.getimage.1429078896344 -> imgapi.getimage
-    return (id.replace(/\.[0-9]{13}$/, ''));
+    return (id.replace(/\.[0-9]+$/, ''));
 }
 
 function shortFmt(evt, opts) {
     var action_prefix = (opts ? opts.prefix : null);
-    var evt_id = trimIdTime(evt.id);
+    var evt_id = trimIdSeq(evt.id);
     var hostname = evt.hostname;
     var req_id = evt.req_id;
     var time = shortTime(evt.time);
@@ -330,7 +333,7 @@ function reportProcessRequest(req_id, events, data) {
     });
 
     first = sorted[0];
-    first_id = trimIdTime(first.id);
+    first_id = trimIdSeq(first.id);
 
     // XXX this assumes a synchronous request at the top level and all other
     // bits for the req_id happen in between.
@@ -367,7 +370,7 @@ function reportProcessRequest(req_id, events, data) {
     // Sum the datapoints for this record
     datapoints = {};
     sorted.forEach(function _recordOne(evt) {
-        var id = trimIdTime(evt.id);
+        var id = trimIdSeq(evt.id);
 
         if (!datapoints[id]) {
             datapoints[id] = {};
@@ -586,7 +589,7 @@ function handleEnd(evt) {
     requestEvents[evt.req_id].push({
         elapsed: evt.elapsed,
         hostname: evt.hostname,
-        id: trimIdTime(evt.id),
+        id: trimIdSeq(evt.id),
         start: start
     });
 
