@@ -14,6 +14,8 @@
  * -e REGEX     show only events w/ top-level id that matches REGEX
  * -r           show report at end of input
  * -s           show events as encountered (stream)
+ * -t TIME      show only events that took more than TIME ms
+ * -T REQ_ID    show a timeline of events for REQ_ID
  * --no-color   disable colors in output
  *
  * Examples:
@@ -79,6 +81,12 @@ options = [
         type: 'positiveInteger',
         help: 'Show only events that took longer than MS milliseconds',
         helpArg: 'MS'
+    },
+    {
+        names: ['timeline', 'T'],
+        type: 'string',
+        help: 'Show a timeline view of a specific request',
+        helpArg: 'REQ_ID'
     },
     {
         names: ['no-color'],
@@ -539,6 +547,102 @@ function outputReport() {
     });
 }
 
+function outputTimeline() {
+    var ends = [];
+    var level = 0;
+    var first_start = 0;
+    var seen_starts = {};
+    var sorted;
+
+    if (!requestEvents.hasOwnProperty(cmdline_opts.timeline)) {
+        console.error('ERROR: No events for req_id: ' + cmdline_opts.timeline + ' found');
+        return;
+    }
+
+    sorted = requestEvents[cmdline_opts.timeline].sort(function (a, b) {
+        if (a.start === b.start) {
+            return (a.id.length - b.id.length);
+        }
+        return (a.start - b.start);
+    });
+
+    function printEnd(evt) {
+        var prefix = '';
+
+        if (ends.length > 0) {
+            prefix = fitTo('+' + (evt.time - first_start).toString(), 13, {dir: 'right'});
+        } else {
+            prefix = evt.time.toString();
+        }
+
+        console.log(prefix + ' (' + fitTo(evt.elapsed + ')', 7) + filler(' ', evt.level * 4)
+            + 'END   ' + evt.id + evt.suffix);
+    }
+
+    function printStart(evt) {
+        var prefix = '';
+
+        if (first_start === 0) {
+            first_start = evt.start;
+            prefix = evt.start.toString();
+        } else {
+            prefix = fitTo('+' + (evt.start - first_start).toString(), 13, {dir: 'right'});
+        }
+
+        console.log(prefix + ' ' + filler(' ', (level * 4) + 7)
+            + ' START ' + evt.id + evt.suffix);
+
+    }
+
+    console.log('(all times are in milliseconds)');
+    console.log('REQ_ID: ' + cmdline_opts.timeline + '\n');
+    sorted.forEach(function (evt) {
+        var printme = [];
+
+        ends = ends.filter(function (e) {
+            if (evt.start >= e.time) {
+                level--;
+                printme.push(e);
+                return (false);
+            }
+            return (true);
+        });
+
+        // Output the ENDs that we just removed
+        printme.sort(function (a, b) {
+            if (a.time === b.time) {
+                return (b.id.length - a.id.length);
+            }
+            return (a.time - b.time);
+        }).forEach(printEnd);
+
+        if (seen_starts.hasOwnProperty(evt.id)) {
+            seen_starts[evt.id]++;
+            evt.suffix = ' [' + seen_starts[evt.id] + ']';
+        } else {
+            seen_starts[evt.id] = 0;
+            evt.suffix = '';
+        }
+
+        ends.push({
+            time: evt.start + evt.elapsed,
+            id: evt.id,
+            elapsed: evt.elapsed,
+            level: level,
+            suffix: evt.suffix
+        });
+
+        printStart(evt);
+        level++;
+    });
+
+    while (ends.length > 0) {
+        evt = ends.pop();
+        level--;
+        printEnd(evt);
+    }
+}
+
 function handleBegin(evt) {
     var sig = evtSig(evt);
 
@@ -562,7 +666,7 @@ function handleBegin(evt) {
 
     if (cmdline_opts.stream) {
         console.log(shortFmt(evt));
-    } else if (!cmdline_opts.report) {
+    } else if (!cmdline_opts.report && !cmdline_opts.timeline) {
         console.log(JSON.stringify(evt));
     }
 }
@@ -607,7 +711,7 @@ function handleEnd(evt) {
         } else if (evt.elapsed >= cmdline_opts.time) {
             console.log(shortFmt(evt, {prefix: '', start_plus: true}));
         }
-    } else if (!cmdline_opts.report) {
+    } else if (!cmdline_opts.report && !cmdline_opts.timeline) {
         console.log(JSON.stringify(evt));
     }
 }
@@ -616,6 +720,12 @@ function handleEvent(evt) {
     if (!evt) {
         return;
     }
+
+    if (cmdline_opts.timeline && (evt.req_id != cmdline_opts.timeline)) {
+        // When we're doing a timeline we only care about the one req
+        return;
+    }
+
     switch (evt.phase) {
         case 'end':
             handleEnd(evt);
@@ -656,6 +766,12 @@ function main() {
         stylize = stylizeWithoutColor;
     }
 
+    if (cmdline_opts.timeline && (cmdline_opts.report || cmdline_opts.stream)) {
+        console.error('evttool: cannot combine --timeline and --report or --stream');
+        dumpHelp();
+        process.exit(1);
+    }
+
     forEachLine(function (line) {
         var evt;
 
@@ -669,6 +785,9 @@ function main() {
         if (err) {
             console.error('ERROR: ' + err.message);
             return;
+        }
+        if (cmdline_opts.timeline) {
+            outputTimeline();
         }
         if (cmdline_opts.report) {
             outputReport();
